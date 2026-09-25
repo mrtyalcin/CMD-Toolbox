@@ -13,7 +13,9 @@ A small Windows desktop app for saving and launching CMD commands.
 - Persistent local storage; tools are saved in `%LOCALAPPDATA%\\CmdToolbox\\tools.json`.
 - Custom icons are copied into `%LOCALAPPDATA%\\CmdToolbox\\Icons`.
 - Right-click a tile to edit or delete it.
-- Clicking a tile asks for confirmation, then opens Command Prompt and runs the command.
+- Embedded interactive CMD terminal inside the app; type commands and press Enter.
+- Clicking a tile asks for confirmation, then runs its command in the embedded terminal session.
+- Terminal session is reused so commands such as `cd` can affect subsequent commands.
 
 ## Safety
 Commands run with your Windows user permissions. Only add and run commands you understand and trust.
