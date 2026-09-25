@@ -2,6 +2,8 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+import queue
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import webbrowser
@@ -194,6 +196,9 @@ class CmdToolbox(tk.Tk):
         self.configure(bg="#f3f5f8")
         self.tools = load_tools()
         self.photo_refs = []
+        self.terminal_process = None
+        self.terminal_queue = queue.Queue()
+        self.terminal_visible = True
         self._build_ui()
         self.render_tiles()
 
@@ -204,6 +209,7 @@ class CmdToolbox(tk.Tk):
                  bg="#f3f5f8", fg="#172033").pack(side="left")
         tk.Label(top, text="Your personal Windows command launcher",
                  font=("Segoe UI", 10), bg="#f3f5f8", fg="#5b6475").pack(side="left", padx=16, pady=(8, 0))
+        ttk.Button(top, text="Hide terminal", command=self.toggle_terminal).pack(side="right", padx=(8, 0))
         self.count_label = tk.Label(self, text="", font=("Segoe UI", 9),
                                     bg="#f3f5f8", fg="#697386")
         self.count_label.pack(anchor="w", padx=26, pady=(0, 8))
@@ -220,6 +226,25 @@ class CmdToolbox(tk.Tk):
         self.grid_frame.bind("<Configure>", lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", self._on_canvas_resize)
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+
+        self.terminal_frame = tk.Frame(self, bg="#172033")
+        self.terminal_frame.pack(fill="x", padx=18, pady=(0, 10))
+        terminal_header = tk.Frame(self.terminal_frame, bg="#172033")
+        terminal_header.pack(fill="x", padx=10, pady=(7, 3))
+        tk.Label(terminal_header, text="EMBEDDED CMD TERMINAL", font=("Segoe UI", 9, "bold"),
+                 bg="#172033", fg="#dbeafe").pack(side="left")
+        ttk.Button(terminal_header, text="Clear", command=self.clear_terminal).pack(side="right")
+        self.terminal_output = tk.Text(self.terminal_frame, height=8, bg="#0b1020", fg="#d1fae5",
+                                       insertbackground="white", font=("Consolas", 10),
+                                       relief="flat", wrap="word", state="disabled")
+        self.terminal_output.pack(fill="x", padx=10, pady=(0, 6))
+        self.terminal_input = ttk.Entry(self.terminal_frame)
+        self.terminal_input.pack(fill="x", padx=10, pady=(0, 10))
+        self.terminal_input.insert(0, "Type a command and press Enter…")
+        self.terminal_input.bind("<FocusIn>", self._clear_input_placeholder)
+        self.terminal_input.bind("<Return>", self._terminal_enter)
+        self._append_terminal("CMD Toolbox terminal ready. Click a tool or type a command below.")
+        self.after(100, self._drain_terminal_queue)
 
         footer = tk.Label(self, text=f"Saved locally in: {DATA_FILE}",
                           font=("Segoe UI", 8), bg="#f3f5f8", fg="#8a93a3")
@@ -344,16 +369,101 @@ class CmdToolbox(tk.Tk):
         except OSError as exc:
             messagebox.showerror("Save failed", f"Could not save your tools:\n{exc}", parent=self)
 
+    def _append_terminal(self, text):
+        self.terminal_output.configure(state="normal")
+        self.terminal_output.insert("end", text if text.endswith("\n") else text + "\n")
+        self.terminal_output.see("end")
+        self.terminal_output.configure(state="disabled")
+
+    def clear_terminal(self):
+        self.terminal_output.configure(state="normal")
+        self.terminal_output.delete("1.0", "end")
+        self.terminal_output.configure(state="disabled")
+
+    def toggle_terminal(self):
+        if self.terminal_visible:
+            self.terminal_frame.pack_forget()
+            self.terminal_visible = False
+        else:
+            self.terminal_frame.pack(fill="x", padx=18, pady=(0, 10), before=self.winfo_children()[-1])
+            self.terminal_visible = True
+
+    def _clear_input_placeholder(self, _event=None):
+        if self.terminal_input.get() == "Type a command and press Enter…":
+            self.terminal_input.delete(0, "end")
+
+    def _ensure_terminal(self):
+        if self.terminal_process and self.terminal_process.poll() is None:
+            return
+        try:
+            self.terminal_process = subprocess.Popen(
+                ["cmd.exe", "/Q", "/D"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                bufsize=1, creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            threading.Thread(target=self._read_terminal, daemon=True).start()
+            self._append_terminal("Started cmd.exe. Commands run in this session.")
+        except Exception as exc:
+            messagebox.showerror("Could not start terminal", str(exc), parent=self)
+            self.terminal_process = None
+
+    def _read_terminal(self):
+        proc = self.terminal_process
+        try:
+            for line in proc.stdout:
+                self.terminal_queue.put(line)
+        except (OSError, ValueError):
+            pass
+        self.terminal_queue.put("\n[Terminal process ended.]\n")
+
+    def _drain_terminal_queue(self):
+        try:
+            while True:
+                line = self.terminal_queue.get_nowait()
+                self.terminal_output.configure(state="normal")
+                self.terminal_output.insert("end", line)
+                self.terminal_output.see("end")
+                self.terminal_output.configure(state="disabled")
+        except queue.Empty:
+            pass
+        if self.winfo_exists():
+            self.after(100, self._drain_terminal_queue)
+
+    def _send_terminal_command(self, command):
+        self._ensure_terminal()
+        if not self.terminal_process or self.terminal_process.poll() is not None:
+            return
+        try:
+            self._append_terminal(f"> {command}")
+            self.terminal_process.stdin.write(command + "\n")
+            self.terminal_process.stdin.flush()
+        except (OSError, ValueError) as exc:
+            self._append_terminal(f"[Could not send command: {exc}]")
+
+    def _terminal_enter(self, _event=None):
+        command = self.terminal_input.get().strip()
+        self.terminal_input.delete(0, "end")
+        if command and command != "Type a command and press Enter…":
+            self._send_terminal_command(command)
+        return "break"
+
     def run_tool(self, tool):
         command = tool.get("command", "").strip()
         if not command:
             return
-        if not messagebox.askyesno("Run command", f"Run this command in Command Prompt?\n\n{command}\n\nOnly run commands you trust.", parent=self):
+        if not messagebox.askyesno("Run command", f"Run this command in the embedded terminal?\n\n{command}\n\nOnly run commands you trust.", parent=self):
             return
-        try:
-            subprocess.Popen(["cmd.exe", "/k", command], creationflags=subprocess.CREATE_NEW_CONSOLE)
-        except Exception as exc:
-            messagebox.showerror("Could not launch command", str(exc), parent=self)
+        if not self.terminal_visible:
+            self.toggle_terminal()
+        self._send_terminal_command(command)
+
+    def destroy(self):
+        if self.terminal_process and self.terminal_process.poll() is None:
+            try:
+                self.terminal_process.terminate()
+            except OSError:
+                pass
+        super().destroy()
 
     def show_context_menu(self, event, tool):
         menu = tk.Menu(self, tearoff=0)
